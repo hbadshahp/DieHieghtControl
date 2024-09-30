@@ -1,14 +1,20 @@
 # Libraries and Dependencies
-from machine import Pin
+from machine import Pin, UART
 import network
 import time
 from umqttsimple import MQTTClient
 import json
 from umodbus.serial import Serial
-from machine import UART
+from micropython import const
 
-
-
+# Constants
+MODBUS_SLAVE_ADDRESS = const(0x08)  # Modbus slave address
+MODBUS_START_ADDRESS = const(0x00)  # Start reading from address 0x0000
+MODBUS_REGISTER_QUANTITY = const(2)  # Read two registers (32-bit value)
+RELAY_ACTIVATION_DURATION = 0.05  # seconds
+DIE_SIGNAL_MIN = 250.0
+DIE_SIGNAL_MAX = 350.0
+HEIGHT_THRESHOLD = 0.125
 
 # Define the pins for Modbus communication and relay pins
 rtu_pins = (Pin(17), Pin(18))
@@ -16,31 +22,38 @@ RELAY_UP_PIN = Pin(21, Pin.OUT)
 RELAY_DOWN_PIN = Pin(19, Pin.OUT)
 
 # Initialize the Modbus object
-m = Serial(baudrate=9600, data_bits=8, stop_bits=1, parity=None, pins=rtu_pins, ctrl_pin=Pin(15), uart_id=2)
+m = Serial(
+    baudrate=9600,
+    data_bits=8,
+    stop_bits=1,
+    parity=None,
+    pins=rtu_pins,
+    ctrl_pin=Pin(15),
+    uart_id=2
+)
 
-
-# Increase timeout for Modbus response
-m._uart.init(timeout=300)  # Set UART timeout to 2000 ms (2 seconds)
-#m._uart.init()
-
+# Initialize UART timeout
+# Assuming the timeout is in milliseconds
+m._uart.init(timeout=2000)  # Set UART timeout to 2000 ms (2 seconds)
 
 # WiFi settings
-ssid = "raspi4-iiot"
-password = "iota2024"
+SSID = "raspi4-iiot"
+PASSWORD = "iota2024"
 
 # MQTT settings
-mqtt_server = "10.42.0.1"
-mqtt_port = 1883
-mqtt_user = "npdtom"
-mqtt_password = "npd@tom"
+MQTT_SERVER = "10.42.0.1"
+MQTT_PORT = 1883
+MQTT_USER = "npdtom"
+MQTT_PASSWORD = "npd@tom"
 
-mqtt_topic = "die_height"
-mqtt_subscribe_topic = "die_signal"
+MQTT_TOPIC_PUBLISH = "die_height"
+MQTT_TOPIC_SUBSCRIBE = "die_signal"
 
 # MQTT client setup
-client_id = "03"
+CLIENT_ID = "03"
 
-
+# Global MQTT client variable
+client = None
 
 # Connect to WiFi
 def connect_wifi():
@@ -48,7 +61,7 @@ def connect_wifi():
     wlan.active(True)
     if not wlan.isconnected():
         print("Connecting to WiFi...")
-        wlan.connect(ssid, password)
+        wlan.connect(SSID, PASSWORD)
         timeout = 10  # seconds
         start = time.time()
         while not wlan.isconnected():
@@ -60,73 +73,76 @@ def connect_wifi():
     print("WiFi connected, IP address:", wlan.ifconfig()[0])
     return True
 
-
 # MQTT callback function
 def mqtt_callback(topic, msg):
     print(f"Message received: Topic: {topic}, Msg: {msg}")
-    message = msg.decode('utf-8')
-    print(message)
-    
-    if message == "up":
+    try:
+        message = msg.decode('utf-8').strip()
+        print(f"Decoded message: {message}")
         
-        RELAY_UP_PIN.on()  # Activate the relay
-        time.sleep(0.05) 
-        RELAY_UP_PIN.off()  # Deactivate the relay
-    elif message == "down":
-        
-        RELAY_DOWN_PIN.on()  # Activate the relay
-        time.sleep(0.05) 
-        RELAY_DOWN_PIN.off()  # Deactivate the relay
-    else:
-        die_signal = float(message)
-        if die_signal < 250.0 or die_signal > 350.0:
-            print("Invalid input: Out of range")
-            return
-        
-        success, current_height = readCurrentDieHeight()
-        if not success:
-            print("Failed to read Modbus registers")
-            return
-        
-        difference = current_height - die_signal
-        threshold = 0.125
-        
-        if difference > threshold:
-            print("Operating down relay")
-            operateRelay(RELAY_DOWN_PIN, die_signal, threshold, False)
-        elif difference < -threshold:
-            print("Operating up relay")
-            operateRelay(RELAY_UP_PIN, die_signal, threshold, True)
+        if message == "up":
+            RELAY_UP_PIN.on()  # Activate the relay
+            time.sleep(RELAY_ACTIVATION_DURATION)
+            RELAY_UP_PIN.off()  # Deactivate the relay
+            print("Up relay triggered")
+        elif message == "down":
+            RELAY_DOWN_PIN.on()  # Activate the relay
+            time.sleep(RELAY_ACTIVATION_DURATION)
+            RELAY_DOWN_PIN.off()  # Deactivate the relay
+            print("Down relay triggered")
         else:
-            print("Height is within acceptable range")
+            die_signal = float(message)
+            if die_signal < DIE_SIGNAL_MIN or die_signal > DIE_SIGNAL_MAX:
+                print(f"Invalid input: {die_signal} is out of range ({DIE_SIGNAL_MIN}-{DIE_SIGNAL_MAX})")
+                return
+            
+            success, current_height = readCurrentDieHeight()
+            if not success:
+                print("Failed to read Modbus registers")
+                return
+            
+            difference = current_height - die_signal
+            print(f"Die signal: {die_signal}, Current height: {current_height}, Difference: {difference}")
+            
+            if difference > HEIGHT_THRESHOLD:
+                print("Difference exceeds threshold. Operating down relay.")
+                operateRelay(RELAY_DOWN_PIN, die_signal, HEIGHT_THRESHOLD, is_upward=False)
+            elif difference < -HEIGHT_THRESHOLD:
+                print("Difference exceeds threshold. Operating up relay.")
+                operateRelay(RELAY_UP_PIN, die_signal, HEIGHT_THRESHOLD, is_upward=True)
+            else:
+                print("Height is within acceptable range. No relay action needed.")
+    except ValueError:
+        print("Received message is not a valid float or expected command.")
+    except Exception as e:
+        print(f"Error in MQTT callback: {e}")
 
 # Connect to MQTT broker
 def connect_mqtt():
     global client
     try:
-        client = MQTTClient(client_id, mqtt_server, port=mqtt_port, user=mqtt_user, password=mqtt_password)
+        client = MQTTClient(CLIENT_ID, MQTT_SERVER, port=MQTT_PORT, user=MQTT_USER, password=MQTT_PASSWORD)
         client.set_callback(mqtt_callback)
         client.connect()
-        client.subscribe(mqtt_subscribe_topic)
-        print(f"Connected to MQTT broker at {mqtt_server} with client ID {client_id}")
+        client.subscribe(MQTT_TOPIC_SUBSCRIBE)
+        print(f"Connected to MQTT broker at {MQTT_SERVER} with client ID {CLIENT_ID}")
+        return True
     except Exception as e:
         print(f"Failed to connect to MQTT broker: {e}")
         return False
-    return True
-    
+
 # Function to read current die height
 def readCurrentDieHeight():
-    slave_addr = const(0x08)  # Modbus slave address (updated to 8)
-    starting_address = const(0x00)  # Start reading from address 0x0000
-    register_quantity = const(2)  # Read two registers (32-bit value)
-
-    # Try reading the holding registers
     try:
-        #time.sleep(0.2)  # Small delay to give slave time to respond
-        register_values = m.read_holding_registers(slave_addr, starting_address, register_quantity, signed=False)
+        register_values = m.read_holding_registers(
+            MODBUS_SLAVE_ADDRESS,
+            MODBUS_START_ADDRESS,
+            MODBUS_REGISTER_QUANTITY,
+            signed=False
+        )
         
-        if register_values is None or len(register_values) != register_quantity:
-            print("Failed to read Modbus registers")
+        if register_values is None or len(register_values) != MODBUS_REGISTER_QUANTITY:
+            print("Failed to read Modbus registers or incomplete data received")
             return False, 0.0
         
         # Combine the two 16-bit registers into a 32-bit unsigned integer
@@ -135,7 +151,7 @@ def readCurrentDieHeight():
 
         combined_value = (register1 << 16) | register2
 
-        # Convert to floating-point
+        # Convert to floating-point (assuming scaling factor of 100000)
         die_height = combined_value / 100000.0
 
         print(f"Current Die Height: {die_height:.2f}")
@@ -148,8 +164,9 @@ def readCurrentDieHeight():
 # Operate relay
 def operateRelay(relay_pin, target_height, threshold, is_upward):
     relay_pin.on()  # Activate the relay
-    print(f"Relay {'up' if is_upward else 'down'} activated to reach target height {target_height}")
-
+    action = "up" if is_upward else "down"
+    print(f"{action.capitalize()} relay activated to reach target height {target_height}")
+    
     success, current_height = readCurrentDieHeight()
     
     while success:
@@ -160,37 +177,42 @@ def operateRelay(relay_pin, target_height, threshold, is_upward):
             print("Threshold reached. Deactivating relay.")
             break
         
-        time.sleep(0.05)  # Small delay to prevent rapid iterations
+        time.sleep(RELAY_ACTIVATION_DURATION)  # Small delay to prevent rapid iterations
         success, current_height = readCurrentDieHeight()
     
     relay_pin.off()  # Deactivate the relay
-    print("Relay deactivated. Target height reached.")
-
+    print(f"{action.capitalize()} relay deactivated. Target height reached.")
 
 # Main loop
 def main():
+    # Connect to WiFi with retry mechanism
     while not connect_wifi():
         print("Retrying WiFi connection in 5 seconds...")
         time.sleep(5)
     
+    # Connect to MQTT with retry mechanism
     while not connect_mqtt():
         print("Retrying MQTT connection in 5 seconds...")
         time.sleep(5)
-
+    
     while True:
         try:
             client.check_msg()  # Check for new MQTT messages
             
             # Optional: Publish current die height periodically
+            # Uncomment the following block if publishing is desired
+            
+            '''
             success, die_height = readCurrentDieHeight()
             if success:
                 msg = json.dumps({"height": die_height})
-                client.publish(mqtt_topic, msg)
+                client.publish(MQTT_TOPIC_PUBLISH, msg)
+                print(f"Published die height: {die_height}")
             else:
                 print("Failed to read die height")
-            
             time.sleep(1)
-            
+            '''
+        
         except OSError as e:
             print(f"MQTT connection lost: {e}")
             while not connect_mqtt():
@@ -203,5 +225,3 @@ def main():
 # Execute the main loop
 if __name__ == "__main__":
     main()
-
-
