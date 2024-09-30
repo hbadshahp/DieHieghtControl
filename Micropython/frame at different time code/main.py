@@ -11,7 +11,7 @@ m = Serial(baudrate=9600, data_bits=8, stop_bits=1, parity=None, pins=rtu_pins, 
 
 
 # Increase timeout for Modbus response
-m._uart.init(timeout=2000)  # Set UART timeout to 2000 ms (2 seconds)
+m._uart.init(timeout=300)  # Set UART timeout to 2000 ms (2 seconds)
 #m._uart.init()
 
 # Function to read current die height
@@ -38,7 +38,7 @@ def readCurrentDieHeight():
         # Convert to floating-point
         die_height = combined_value / 100000.0
 
-        print(f"Current Die Height: {die_height:.4f}")
+        print(f"Current Die Height: {die_height:.2f}")
         return True, die_height
 
     except Exception as e:
@@ -49,10 +49,11 @@ def readCurrentDieHeight():
 while True:
     #print("start")
     success, die_height = readCurrentDieHeight()
-    if success:
-        print(f"Die Height: {die_height:.4f}")
+    '''if success:
+        print(f"Die Height: {die_height:.2f}")
     else:
-        print("Error reading die height")
+        print("Error reading die height")'''
     
     #time.sleep(1)
+
 
